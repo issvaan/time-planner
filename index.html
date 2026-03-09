@@ -71,9 +71,32 @@
   };
 
   window.selectActivity = function(day, activity) {
-    if (!window.activityState[day]) window.activityState[day] = {};
-    const key = activity;
-    window.activityState[day][key] = !window.activityState[day][key];
+    if (!window.activityState[day]) window.activityState[day] = { selected: {}, times: {}, sleep: {} };
+    if (!window.activityState[day].selected) window.activityState[day].selected = {};
+    const wasSelected = !!window.activityState[day].selected[activity];
+    window.activityState[day].selected[activity] = !wasSelected;
+    if (wasSelected) {
+      delete window.activityState[day].times[activity];
+    }
+    renderActivityPicker(day);
+    clearTimeout(syncTimeout);
+    syncTimeout = setTimeout(saveState, 800);
+  };
+
+  window.updateActivityTime = function(day, activity, field, value) {
+    if (!window.activityState[day]) window.activityState[day] = { selected: {}, times: {}, sleep: {} };
+    if (!window.activityState[day].times) window.activityState[day].times = {};
+    if (!window.activityState[day].times[activity]) window.activityState[day].times[activity] = {};
+    window.activityState[day].times[activity][field] = value;
+    renderActivityPicker(day);
+    clearTimeout(syncTimeout);
+    syncTimeout = setTimeout(saveState, 800);
+  };
+
+  window.updateSleep = function(day, field, value) {
+    if (!window.activityState[day]) window.activityState[day] = { selected: {}, times: {}, sleep: {} };
+    if (!window.activityState[day].sleep) window.activityState[day].sleep = {};
+    window.activityState[day].sleep[field] = value;
     renderActivityPicker(day);
     clearTimeout(syncTimeout);
     syncTimeout = setTimeout(saveState, 800);
@@ -528,13 +551,20 @@ function renderDay(day) {
   // Stats
   const workSeg  = data.segments.find(s => s.label === 'Trabajo');
   const polloSeg = data.segments.find(s => s.label === 'Preparación');
-  const traslado = data.segments.filter(s => s.label.startsWith('Traslado')).reduce((a,b)=>a+b.hours,0);
+  const traslado = data.segments.filter(s => s.label === 'Traslado').reduce((a,b)=>a+b.hours,0) + (day !== 'sab' && day !== 'dom' ? 1.2 : 0);
 
-  document.getElementById('stats').innerHTML = `
-    <div class="stat-card"><div class="stat-num" style="color:var(--work)">${workSeg ? workSeg.hours : 0}h</div><div class="stat-label">Trabajo IMENSO</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:var(--pollo)">${polloSeg ? (polloSeg.hours + (data.segments.find(s=>s.label==='Servicio')?.hours||0)) : 0}h</div><div class="stat-label">CHKN CRNR</div></div>
-    <div class="stat-card"><div class="stat-num" style="color:var(--personal)">${data.segments.find(s=>s.label==='Mañana') ? data.segments.find(s=>s.label==='Mañana').hours : 0}h</div><div class="stat-label">Mañana</div></div>
+  const isWeekend = (day === 'sab' || day === 'dom');
+
+  document.getElementById('stats').innerHTML = isWeekend ? `
+    <div class="stat-card"><div class="stat-num" style="color:var(--pollo)">${(polloSeg ? polloSeg.hours : 0) + (data.segments.find(s=>s.label==='Servicio')?.hours||0)}h</div><div class="stat-label">CHKN CRNR</div></div>
     <div class="stat-card"><div class="stat-num" style="color:var(--libre)">${traslado.toFixed(1)}h</div><div class="stat-label">Traslado total</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:var(--pollo)">${data.segments.find(s=>s.label==='Cierre')?.hours||0}h</div><div class="stat-label">Cierre</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:var(--muted)">12–18h</div><div class="stat-label">Horario servicio</div></div>
+  ` : `
+    <div class="stat-card"><div class="stat-num" style="color:var(--work)">${workSeg ? workSeg.hours : 0}h</div><div class="stat-label">Trabajo IMENSO</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:var(--personal)">${data.segments.find(s=>s.label==='Mañana')?.hours||0}h</div><div class="stat-label">Mañana</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:var(--libre)">${traslado.toFixed(1)}h</div><div class="stat-label">Traslado total</div></div>
+    <div class="stat-card"><div class="stat-num" style="color:var(--muted)">9–18h</div><div class="stat-label">Horario trabajo</div></div>
   `;
 
   // Timeline
@@ -578,47 +608,146 @@ function renderDay(day) {
   renderActivityPicker(day);
 }
 
+function parseHHMM(str) {
+  if (!str) return null;
+  const [h, m] = str.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return null;
+  return h + m / 60;
+}
+
+function calcHours(start, end) {
+  const s = parseHHMM(start), e = parseHHMM(end);
+  if (s === null || e === null) return null;
+  let diff = e - s;
+  if (diff < 0) diff += 24; // overnight
+  return diff;
+}
+
+function fmtHours(h) {
+  if (h === null) return '—';
+  const hrs = Math.floor(h);
+  const mins = Math.round((h - hrs) * 60);
+  return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+}
+
 function renderActivityPicker(day) {
   const card = document.getElementById('activityCard');
   const data = schedules[day];
 
-  if (!data.showActivity) {
-    card.style.display = 'none';
-    return;
-  }
-
+  if (!data.showActivity) { card.style.display = 'none'; return; }
   card.style.display = 'block';
-  const selected = (window.activityState && window.activityState[day]) ? window.activityState[day] : {};
+
+  const state = (window.activityState && window.activityState[day]) ? window.activityState[day] : {};
+  const selected = state.selected || {};
+  const times = state.times || {};
+  const sleep = state.sleep || {};
   const selectedList = ACTIVITIES.filter(a => selected[a.id]);
 
-  let noteHTML = '';
-  if (selectedList.length > 0) {
-    const notes = selectedList.map(a => {
-      const n = activityNotes[a.id];
-      return `<div style="margin-top:0.6rem;padding:0.6rem 0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);font-size:0.82rem;">
-        <span style="color:var(--personal);font-family:'DM Mono',monospace;font-size:0.75rem;">${a.icon} ${a.label} · ${n.time}</span><br>
-        <span style="color:var(--muted)">${n.note}</span>
-      </div>`;
-    }).join('');
-    noteHTML = `<div style="margin-top:0.75rem">${notes}</div>`;
-  }
-
+  // ── Activity chips ──
   const chipsHTML = ACTIVITIES.map(a => {
-    const isSelected = !!selected[a.id];
-    return `<div class="activity-chip ${isSelected ? 'selected' : ''}" onclick="selectActivity('${day}','${a.id}')">
-      <span class="chip-icon">${a.icon}</span>
-      <span>${a.label}</span>
+    const isSel = !!selected[a.id];
+    return `<div class="activity-chip ${isSel ? 'selected' : ''}" onclick="selectActivity('${day}','${a.id}')">
+      <span class="chip-icon">${a.icon}</span><span>${a.label}</span>
     </div>`;
   }).join('');
+
+  // ── Time inputs for selected activities ──
+  let activityTotal = 0;
+  const timeRowsHTML = selectedList.map(a => {
+    const t = times[a.id] || {};
+    const hrs = calcHours(t.start, t.end);
+    if (hrs !== null) activityTotal += hrs;
+    const durLabel = hrs !== null ? `<span style="font-family:'DM Mono',monospace;font-size:0.75rem;color:var(--personal);margin-left:0.5rem;">${fmtHours(hrs)}</span>` : '';
+    return `<div style="display:flex;align-items:center;gap:0.75rem;padding:0.65rem 0.85rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);margin-top:0.5rem;flex-wrap:wrap;">
+      <span style="font-size:1rem;">${a.icon}</span>
+      <span style="font-size:0.85rem;flex:1;min-width:100px;">${a.label}</span>
+      <div style="display:flex;align-items:center;gap:0.4rem;">
+        <input type="time" value="${t.start||''}" onchange="updateActivityTime('${day}','${a.id}','start',this.value)"
+          style="background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Mono',monospace;font-size:0.78rem;padding:0.3rem 0.5rem;width:100px;">
+        <span style="color:var(--muted);font-size:0.8rem;">→</span>
+        <input type="time" value="${t.end||''}" onchange="updateActivityTime('${day}','${a.id}','end',this.value)"
+          style="background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Mono',monospace;font-size:0.78rem;padding:0.3rem 0.5rem;width:100px;">
+        ${durLabel}
+      </div>
+    </div>`;
+  }).join('');
+
+  // ── Sleep tracker ──
+  const sleepHrs = calcHours(sleep.bedtime, sleep.wakeup);
+  const sleepLabel = sleepHrs !== null ? fmtHours(sleepHrs) : '—';
+  let sleepColor = 'var(--muted)';
+  if (sleepHrs !== null) {
+    if (sleepHrs >= 7.5) sleepColor = 'var(--accent)';
+    else if (sleepHrs >= 6) sleepColor = 'var(--accent2)';
+    else sleepColor = '#f06060';
+  }
+
+  const sleepHTML = `
+    <div style="margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid var(--border);">
+      <div style="font-family:'DM Serif Display',serif;font-size:1rem;margin-bottom:0.75rem;">🛌 Descanso nocturno</div>
+      <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:0.5rem;">
+          <span style="font-size:0.8rem;color:var(--muted);">Me dormí</span>
+          <input type="time" value="${sleep.bedtime||''}" onchange="updateSleep('${day}','bedtime',this.value)"
+            style="background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Mono',monospace;font-size:0.78rem;padding:0.3rem 0.5rem;width:100px;">
+        </div>
+        <div style="display:flex;align-items:center;gap:0.5rem;">
+          <span style="font-size:0.8rem;color:var(--muted);">Me desperté</span>
+          <input type="time" value="${sleep.wakeup||''}" onchange="updateSleep('${day}','wakeup',this.value)"
+            style="background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'DM Mono',monospace;font-size:0.78rem;padding:0.3rem 0.5rem;width:100px;">
+        </div>
+        <span style="font-family:'DM Mono',monospace;font-size:0.82rem;color:${sleepColor};font-weight:500;">${sleepLabel}${sleepHrs !== null ? (sleepHrs >= 7.5 ? ' ✓' : sleepHrs >= 6 ? ' ⚠' : ' ✗') : ''}</span>
+      </div>
+    </div>`;
+
+  // ── Daily summary ──
+  let summaryHTML = '';
+  const workHours = 8;
+  const commuteHours = 2.3;
+  const morningHours = 1.3;
+  const totalAccountedFor = workHours + commuteHours + morningHours + activityTotal;
+  const freeUntracked = Math.max(0, 24 - totalAccountedFor - (sleepHrs || 0));
+
+  if (selectedList.length > 0 || sleepHrs !== null) {
+    const bars = [
+      { label: 'Trabajo', hours: workHours, color: 'var(--work)' },
+      { label: 'Traslado', hours: commuteHours, color: 'var(--libre)' },
+      { label: 'Mañana', hours: morningHours, color: 'var(--personal)' },
+      ...(activityTotal > 0 ? [{ label: 'Actividades', hours: activityTotal, color: 'var(--personal)' }] : []),
+      ...(sleepHrs !== null ? [{ label: 'Sueño', hours: sleepHrs, color: '#5060a0' }] : []),
+      ...(freeUntracked > 0.2 ? [{ label: 'Sin registrar', hours: freeUntracked, color: 'var(--border)' }] : []),
+    ];
+    const total24 = bars.reduce((a,b)=>a+b.hours,0);
+    const barsHTML = bars.map(b => {
+      const pct = (b.hours/total24*100).toFixed(1);
+      return `<div title="${b.label}: ${fmtHours(b.hours)}" style="height:100%;width:${pct}%;background:${b.color};border-radius:2px;" ></div>`;
+    }).join('');
+
+    summaryHTML = `
+      <div style="margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid var(--border);">
+        <div style="font-family:'DM Serif Display',serif;font-size:1rem;margin-bottom:0.75rem;">📊 Resumen del día</div>
+        <div style="display:flex;gap:3px;height:12px;border-radius:6px;overflow:hidden;margin-bottom:0.75rem;">${barsHTML}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:0.75rem;">
+          ${bars.map(b=>`<span style="font-size:0.78rem;color:var(--muted);font-family:'DM Mono',monospace;">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${b.color};margin-right:4px;"></span>
+            ${b.label} ${fmtHours(b.hours)}
+          </span>`).join('')}
+        </div>
+        ${sleepHrs !== null && sleepHrs < 7 ? `<div style="margin-top:0.75rem;font-size:0.8rem;color:#f06060;font-family:'DM Mono',monospace;">⚠ Menos de 7h de sueño — considera ajustar el horario de mañana.</div>` : ''}
+        ${sleepHrs !== null && sleepHrs >= 7.5 ? `<div style="margin-top:0.75rem;font-size:0.8rem;color:var(--accent);font-family:'DM Mono',monospace;">✓ Buen descanso registrado.</div>` : ''}
+      </div>`;
+  }
 
   card.innerHTML = `
     <div class="card-header" style="margin-bottom:0.25rem">
       <div class="dot" style="background:var(--personal)"></div>
-      <div class="activity-title">¿Qué hiciste esta noche?</div>
+      <div class="activity-title">Noche · actividades y descanso</div>
     </div>
     <div class="activity-subtitle">// registra cómo usas tu tiempo fuera del trabajo</div>
     <div class="activity-grid">${chipsHTML}</div>
-    ${noteHTML}
+    ${timeRowsHTML}
+    ${sleepHTML}
+    ${summaryHTML}
   `;
 }
 
